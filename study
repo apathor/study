@@ -3,7 +3,7 @@
 # > study TOPIC
 # Provide source or information for the given topic.
 # Likely topics include: commands, files, words.
-# Requires GNU coreutils
+# Requires GNU coreutils.
 # study © Mike Lalumiere 2017
 
 # TODO
@@ -68,7 +68,7 @@ fetch_apt() {
     # unpack the archive and apply patches using description file
     # local dsc=$(apt-cache showsrc "$pkg" | awk '/\.dsc$/{print $3; exit}')
     local dsc=(*.dsc)
-    dpkg-source -x "$dsc" "$out/$pkg" 1>&2
+    dpkg-source -x "${dsc[0]}" "$out/$pkg" 1>&2
     # clean up if fetch failed
     if empty "$out"; then rmdir "$out"; return 3; fi
 }
@@ -105,13 +105,13 @@ fetch_dnf() {
     dnf download --source "$pkg" # &>/dev/null
     if [ $? -ne 0 ]; then return 2; fi
     # unpack the source from the package somehow
-    local rpm="$(stat -c "%n" ./*.src.rpm | head -n1)"
+    local rpm=$(stat -c "%n" ./*.src.rpm | head -n1)
     if type rpmdev-extract &>/dev/null; then
         # rpmdev-extract does the whole job
         rpmdev-extract -q -C "$out" -f "$rpm"
     elif type rpm2archive &>/dev/null; then
         # rpm2archive makes a tarball
-        rpm2archive "$rpm" #  &>/dev/null
+        rpm2archive "$rpm" # &>/dev/null
         tar -xvzf "${rpm}.tgz" -C "$out" # &>/dev/null
     fi
     # clean up if fetch failed
@@ -140,26 +140,29 @@ provides_cpan() {
 }
 
 fetch_cpan() {
-    :
+    return 1;
 }
 
-# fetchsource PATH SOURCEDIR
+# fetchsource PATH SOURCEDIR [SYSTEM]
 #  Try to download sources for the file at PATH into SOURCEDIR.
 fetchsource() {
+    # establish known package systems
+    local known=(apt dnf cpan)
+    # and dispatch error strings
+    local errs=(SUCCESS ERROR UNABLE FAILURE ?????)
     # given a path and working directory
     local path="$1"; if ! [ -e "$path" ]; then return 1; fi
     local sdir="$2"; if ! [ -d "$sdir" ]; then return 1; fi
-    # setup dispatch error strings
-    local errs=(SUCCESS ERROR UNABLE FAILURE ?????)
-    # using package name, download directory, and return code
-    local pkg out rc
+    local sys="$3";
     # record directories into which source was fetched
     declare -a dirs
-    # for each known package system
-    for env in apt dnf; do
+    # using package name, download directory, and return code
+    local pkg out rc
+    # fetch source with the given package system or all known systems
+    while read env; do
         # check for the dispatch functions
         if ! type "provides_$env" "fetch_$env" &>/dev/null; then
-            printf "[%s] Expected functions missing?\n" "$env" >&2
+            printf "[%s] Expected functions missing?\n" "${env^^}" >&2
             continue
         fi
         # find package that provides the given path
@@ -175,21 +178,22 @@ fetchsource() {
             printf "EXISTS\n" >&2
             dirs+=("$out")
             continue
-        elif ! mkdir -p "$out"; then
+        elif ! mkdir -p "$out" &>/dev/null; then
             printf "FAILURE\n" >&2
             continue
         else
             printf "SUCCESS\n" >&2
         fi
         # fetch pacakge source maybe
-        printf "[%s] Fetching source for %s... " "$env" "$pkg" >&2
-        eval "fetch_$env '$pkg' '$out'"
+        printf "[%s] Fetching source for %s... " "${env^^}" "$pkg" >&2
+        eval "fetch_$env '$pkg' '$out'" #  &>/dev/null # TODO optional output?
         rc="$?"
         printf "%s\n" "${errs[$rc]}" >&2;
         if ! [ "$rc" -eq 0 ]; then continue; fi
         # record the directory
         dirs+=("$out")
-    done
+    done < <( { if [ -n "$sys" ]; then printf "%s\n" "$sys"
+                else printf "%s\n" "${known[@]}"; fi; })
     # write out package dirs
     printf "%s\n" "${dirs[@]}"
 }
@@ -201,14 +205,15 @@ study() {
     # environment
     local srcdir=${STUDY_DIR:-"$HOME/.study"} # $STUDY_DIR user directory
     # local srctmp=${STUDY_TMP:-"/tmp/study"}   # $STUDY_TMP temporary directory
+    # local pager=${PAGER:-"more"}              # $PAGER for viewing files
     local editor=${EDITOR:-"vim"}             # $EDITOR for editing files
-    local pager=${PAGER:-"more"}              # $PAGER for viewing files
     # accept options
-    local fetch noedit
-    while getopts "dp" opt; do
+    local fetch noedit system
+    while getopts ":dps:" opt; do
         case "$opt" in
             d) fetch="get sources from known repositories" ;;
             p) noedit="print source paths instead of editing" ;;
+            s) system="$OPTARG" ;;
             \?) echo "Invalid option: -$OPTARG" >&2; return 255 ;;
         esac
     done
@@ -252,7 +257,7 @@ study() {
                 while read dir; do
                     if ! [ -e "$dir" ]; then continue; fi
                     outs+=("$dir")
-                done < <(fetchsource "$path" "$srcdir")
+                done < <(fetchsource "$path" "$srcdir" "$system")
             else
                 outs+=("$path")
             fi
