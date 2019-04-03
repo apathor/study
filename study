@@ -1,16 +1,15 @@
 #!/bin/bash
 # study - RTFS!
 # > study TOPIC
-# Provide source or information for the given topic.
-# Likely topics include: commands, files, words.
-# Requires GNU coreutils.
-# study © Mike Lalumiere 2017
+# Provide the source code or documentation for the given command, file, or topic.
+# Requires GNU coreutils
+# study © Mike Lalumiere 2018
 
 # TODO
-#  - an option to limit output to package name from provides_X functions
-#  - an option to only list available systems
-#  - OS-systems: yum, pkg, pacman, guix
-#  - Language systems: perl cpan, ruby gem, haskell cabal, python pip
+#  - Add an option to limit output to package name from provides_X functions
+#  - Add an option to only list available systems
+#  - Add support for OS package systems: yum, pkg, pacman, guix
+#  - Add support for programming language package systems
 
 # debug?
 if [ -n "$STUDY_DEBUG" ]; then set -x; fi
@@ -21,7 +20,7 @@ if [ -n "$STUDY_DEBUG" ]; then set -x; fi
 empty() { (shopt -s nullglob dotglob; [ -d "$1" ] && c=($1/*); ((! ${#c[@]}))); }
 
 # binary PATH - Is the given file a binary file?
-binary() { file -i "$@" | grep -q binary; }
+binary() { [[ -f "$1" ]] && [[ $(file -i "$1") =~ charset=binary ]]; }
 
 # whence COMMAND - Print real path to the given command.
 whence() { readlink -e "$(type -P "$1")"; }
@@ -46,10 +45,10 @@ provides_apt() {
     if ! type "dpkg" &>/dev/null; then return 2; fi
     # figure package for path
     local pkg
-    pkg=$(dpkg -S "$path" | awk -F: 'NR==1{print $1}')
+    IFS=: read -r pkg _ < <(dpkg -S "$path");
     # write package name if found
     if [ -z "$pkg" ]; then return 3; fi
-    echo "$pkg"
+    printf "%s\n" "$pkg"
 }
 
 fetch_apt() {
@@ -59,7 +58,7 @@ fetch_apt() {
     # require apt tools
     if ! type apt-get apt-cache dpkg-source &>/dev/null; then return 2; fi
     # output directory
-    if ! [ -d "$out" ] && ! mkdir -u "$out"; then return 1; fi
+    if ! [ -d "$out" ] && ! mkdir -p "$out"; then return 1; fi
     if ! empty "$out"; then echo "$out"; return 0; fi
     # from the output directory
     cd "$out"
@@ -80,9 +79,8 @@ provides_dnf() {
     if [ -z "$path" ] || ! [ -e "$path" ]; then return 1; fi
     # require dnf
     if ! type "dnf" &>/dev/null; then return 2; fi
-    # figure out package from path
+    # figure out package from path or maybe the file name
     local pkg=$(dnf provides "$path" | awk 'NR==2{print $1}')
-    #  or maybe the file name
     if [ -z "$pkg" ]; then
         pkg=$(dnf provides "${path##*/}" | awk 'NR==2{print $1}') ;
     fi
@@ -105,13 +103,13 @@ fetch_dnf() {
     dnf download --source "$pkg" # &>/dev/null
     if [ $? -ne 0 ]; then return 2; fi
     # unpack the source from the package somehow
-    local rpm=$(stat -c "%n" ./*.src.rpm | head -n1)
+    local rpm="$(stat -c "%n" ./*.src.rpm | head -n1)"
     if type rpmdev-extract &>/dev/null; then
         # rpmdev-extract does the whole job
         rpmdev-extract -q -C "$out" -f "$rpm"
     elif type rpm2archive &>/dev/null; then
         # rpm2archive makes a tarball
-        rpm2archive "$rpm" # &>/dev/null
+        rpm2archive "$rpm" #  &>/dev/null
         tar -xvzf "${rpm}.tgz" -C "$out" # &>/dev/null
     fi
     # clean up if fetch failed
@@ -124,14 +122,14 @@ provides_cpan() {
     local path="$1";
     if [ -z "$path" ] || ! [ -e "$path" ]; then return 1; fi
     # require perl tools
-    if ! type perl cpan &>/dev/null; then return 2; fi
+    if ! type perl &>/dev/null; then return 2; fi
     # get perl include directories
     local inc=($(perl -e 'printf "%s\n", $_ for grep { !/^\.\.?$/ } @INC'))
     printf "INC %s\n" "${inc[@]}" >&2
     # figure out which module based on packlists
     local pkg
     while read list; do
-        if grep -lq "$path" "$list"; then
+        if grep -q "$path" "$list"; then
             pkg="$list"
             break
         fi
@@ -140,29 +138,26 @@ provides_cpan() {
 }
 
 fetch_cpan() {
-    return 1;
+    :
 }
 
-# fetchsource PATH SOURCEDIR [SYSTEM]
+# fetchsource PATH SOURCEDIR
 #  Try to download sources for the file at PATH into SOURCEDIR.
 fetchsource() {
-    # establish known package systems
-    local known=(apt dnf cpan)
-    # and dispatch error strings
-    local errs=(SUCCESS ERROR UNABLE FAILURE ?????)
     # given a path and working directory
     local path="$1"; if ! [ -e "$path" ]; then return 1; fi
     local sdir="$2"; if ! [ -d "$sdir" ]; then return 1; fi
-    local sys="$3";
-    # record directories into which source was fetched
-    declare -a dirs
+    # setup dispatch error strings
+    local errs=(SUCCESS ERROR UNABLE FAILURE ?????)
     # using package name, download directory, and return code
     local pkg out rc
-    # fetch source with the given package system or all known systems
-    while read env; do
+    # record directories into which source was fetched
+    declare -a dirs
+    # for each known package system
+    for env in apt dnf; do
         # check for the dispatch functions
         if ! type "provides_$env" "fetch_$env" &>/dev/null; then
-            printf "[%s] Expected functions missing?\n" "${env^^}" >&2
+            printf "[%s] Expected functions missing?\n" "$env" >&2
             continue
         fi
         # find package that provides the given path
@@ -178,22 +173,21 @@ fetchsource() {
             printf "EXISTS\n" >&2
             dirs+=("$out")
             continue
-        elif ! mkdir -p "$out" &>/dev/null; then
+        elif ! mkdir -p "$out"; then
             printf "FAILURE\n" >&2
             continue
         else
             printf "SUCCESS\n" >&2
         fi
         # fetch pacakge source maybe
-        printf "[%s] Fetching source for %s... " "${env^^}" "$pkg" >&2
-        eval "fetch_$env '$pkg' '$out'" #  &>/dev/null # TODO optional output?
+        printf "[%s] Fetching source for %s... " "$env" "$pkg" >&2
+        eval "fetch_$env '$pkg' '$out'"
         rc="$?"
         printf "%s\n" "${errs[$rc]}" >&2;
         if ! [ "$rc" -eq 0 ]; then continue; fi
         # record the directory
         dirs+=("$out")
-    done < <( { if [ -n "$sys" ]; then printf "%s\n" "$sys"
-                else printf "%s\n" "${known[@]}"; fi; })
+    done
     # write out package dirs
     printf "%s\n" "${dirs[@]}"
 }
@@ -205,15 +199,14 @@ study() {
     # environment
     local srcdir=${STUDY_DIR:-"$HOME/.study"} # $STUDY_DIR user directory
     # local srctmp=${STUDY_TMP:-"/tmp/study"}   # $STUDY_TMP temporary directory
-    # local pager=${PAGER:-"more"}              # $PAGER for viewing files
     local editor=${EDITOR:-"vim"}             # $EDITOR for editing files
+    local pager=${PAGER:-"more"}              # $PAGER for viewing files
     # accept options
-    local fetch noedit system
-    while getopts ":dps:" opt; do
+    local fetch noedit
+    while getopts ":dp" opt; do
         case "$opt" in
             d) fetch="get sources from known repositories" ;;
             p) noedit="print source paths instead of editing" ;;
-            s) system="$OPTARG" ;;
             \?) echo "Invalid option: -$OPTARG" >&2; return 255 ;;
         esac
     done
@@ -257,7 +250,7 @@ study() {
                 while read dir; do
                     if ! [ -e "$dir" ]; then continue; fi
                     outs+=("$dir")
-                done < <(fetchsource "$path" "$srcdir" "$system")
+                done < <(fetchsource "$path" "$srcdir")
             else
                 outs+=("$path")
             fi
